@@ -1,6 +1,9 @@
-from itertools import count
+from os import wait, wait4
+import re
+from time import sleep
+from gensim import models
 from hazm import *
-from numpy.core.arrayprint import printoptions
+from numpy.linalg import norm
 
 import pandas as pd
 from pandas import ExcelWriter
@@ -10,9 +13,13 @@ import math
 from collections import Counter
 from operator import truediv
 
+import multiprocessing
+import pickle
+from gensim.models import Word2Vec
+from numpy.linalg import norm
+
 
 ALL_DOC_NUM = 7561
-
 
 
 def normalize(txt):
@@ -313,7 +320,7 @@ def calculate_lengths(champion_list):
 
 
 # ranked retrieval
-def ranked_search(champion_list, sentense, doc_ID_title, lengths):
+def ranked_search(champion_list, sentense, lengths):
     tokenized_query = word_tokenize(sentense)
     unique_tokenized_query = Counter(tokenized_query)
     # print (unique_tokenized_query)
@@ -348,30 +355,158 @@ def ranked_search(champion_list, sentense, doc_ID_title, lengths):
 
 
 
-if __name__ == "__main__":
+# store training data with pickle 
+def store_training_data(training_data, obj_file_name):
+
+    data_file = open(obj_file_name, 'ab')
+    pickle.dump(training_data, data_file)                     
+    data_file.close()
+
+
+
+# train model with our training data and save
+def train_model(obj_file_name, model_file_name):
+
+    # open training data file
+    handle = open(obj_file_name, 'rb')
+    training_data = pickle.load(handle)
     
+
+    docs_num = len (training_data)
+    tokens_num = sum([len(x) for x in training_data])
+    print("docs: ", docs_num)
+    print("tokens: ", tokens_num)
+
+    cores = multiprocessing.cpu_count()
+    w2v_model = Word2Vec(min_count = 1, window = 5, vector_size = 300, alpha = 0.03, workers = cores - 1)
+
+    w2v_model.build_vocab(training_data)
+    w2v_model_vocab_size = len(w2v_model.wv)
+    print("unique vocabs: ", w2v_model_vocab_size)
+
+    w2v_model.train(training_data, total_examples = w2v_model.corpus_count, epochs = 20)
+
+    w2v_model.save(model_file_name)
+
+
+
+# for all term in all docs, calculate tf idf weight and store in a list contains of a dictionary of {term: weight}
+def calculate_tf_idf(doc_word_list, champion_list):
+    docs_tf_idf = []
+
+    for doc_ID, terms in doc_word_list.items():
+        unique_terms = Counter(terms)
+
+        term_weight_dic = {}
+        
+        for term in unique_terms:
+            if term in champion_list:
+                posting = champion_list[term][1]
+                term_weight_dic[term] = (1 + math.log10(posting[doc_ID])) * (math.log10(ALL_DOC_NUM/champion_list[term][0]))
+
+        docs_tf_idf.append(term_weight_dic)
+
+    return docs_tf_idf
+
+
+
+# calculate docs embedding
+def embed (model_file_name, docs_tf_idf):
+
+    w2v_model = Word2Vec.load(model_file_name)
+
+    docs_embedding = []
+
+    for doc in docs_tf_idf:
+        doc_vec = np.zeros(300)
+        weights_sum = 0
+        for token, weight in doc.items():
+            if token in w2v_model.wv:
+                doc_vec += w2v_model.wv[token] * weight
+                weights_sum += weight
+
+        docs_embedding.append(doc_vec/weights_sum)
+
+    return docs_embedding
+
+
+# find similarity of two doc and return in a number between 0 to 1
+def similarity(doc1, doc2):
+    similarity_score = np.dot(doc1, doc2) / (norm(doc1) * norm(doc2))
+    return (similarity_score + 1)/2
+
+
+
+# get query sentence and calculate tf idf weight for its term
+def calculate_query_tf_idf(sentense):
+    tokenized_query = word_tokenize(sentense)
+    unique_tokenized_query = Counter(tokenized_query)
+
+    term_weight_dic = {}
+
+    for term in unique_tokenized_query:
+        if term in champion_list:
+            term_weight_dic[term] = (1 + math.log10(unique_tokenized_query[term])) * (math.log10(ALL_DOC_NUM/champion_list[term][0]))
+
+    return term_weight_dic
+
+
+
+# compare query with all docs and find the most similiae ones
+def enhanced_ranked_search(docs_embedding, query_embedding):
+
+    scores = [0] * (ALL_DOC_NUM + 1)
+
+    for i in range (0, ALL_DOC_NUM):
+        scores[i] = similarity(docs_embedding[i], query_embedding)
+    
+    # sort scores and return their index 
+    list2 = sorted(range(len(scores)), key=lambda k: scores[k])
+    list2.reverse()
+
+    # print highest scores 
+    # print (normlized_scores[list2[0]])
+    # print (normlized_scores[list2[1]])
+    # print (normlized_scores[list2[2]])
+
+    return list2
+
+
+
+if __name__ == "__main__":
+
+
     # read_normalize_write('IR1_7k_news.xlsx', 'IR1_7k_news_normalized.xlsx')
     doc_word = tokenizer('IR1_7k_news_normalized.xlsx')
     doc_ID_title = read_doc_title('IR1_7k_news_normalized.xlsx')
     positional_index = create_positional_index(doc_word)
 
-    number_of_doc_for_each_term = 100
+    # number_of_doc_for_each_term = 100
+    number_of_doc_for_each_term = Inf
     champion_list = create_champion_list(positional_index, number_of_doc_for_each_term)
-
-    # print first m field 
-    # m = 3
-    # pos = {k: positional_index[k] for k in list(positional_index)[:m]}
-    # print(pos)
-    # cham = {k: champion_list[k] for k in list(champion_list)[:m]}
-    # print(cham)
 
     lengths = calculate_lengths(champion_list)
 
+    obj_file_name = 'my_training_data.obj'
+    # model_file_name = "my_files/my_model.model"
+   
+    # store_training_data(list(doc_word.values()), obj_file_name)
+    # train_model(obj_file_name, model_file_name)
+   
+    model_file_name = "word2vec_model_hazm/w2v_150k_hazm_300_v2.model"
+    docs_tf_idf  = calculate_tf_idf(doc_word, champion_list)
+    docs_embedding = embed (model_file_name, docs_tf_idf)
+
+
+    # answer queries
     while True:
         sentense = input("Enter your query: ")
         # query_answer = boolean_search (positional_index, sentense)
+        # query_answer = ranked_search (champion_list, sentense, lengths)
 
-        query_answer = ranked_search (champion_list, sentense, doc_ID_title, lengths)
+        query_tf_idf = calculate_query_tf_idf(sentense)
+        query_embedding = embed (model_file_name, [query_tf_idf])
+        query_answer = enhanced_ranked_search (docs_embedding, query_embedding[0])
 
         counter = 0
         # remove duplicate docID
