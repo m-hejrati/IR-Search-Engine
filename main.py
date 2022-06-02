@@ -1,11 +1,17 @@
-from __future__ import print_function, unicode_literals
-from re import L, search
-import re
+from itertools import count
 from hazm import *
-from numpy import Inf
+from numpy.core.arrayprint import printoptions
 
 import pandas as pd
 from pandas import ExcelWriter
+from numpy import Inf
+import numpy as np 
+import math
+from collections import Counter
+from operator import truediv
+
+
+ALL_DOC_NUM = 7561
 
 
 
@@ -72,7 +78,7 @@ def tokenizer(read_file_name):
     # for i in range (100):
         print("Preprocessing; docID: ", i)
         list = word_tokenize(df_read['content'][i])
-        print("Before: ", len(list))
+        # print("Before: ", len(list))
         
         processed_list = []
         for word in list:
@@ -87,7 +93,7 @@ def tokenizer(read_file_name):
 
         doc_word [i] = processed_list
 
-        print("After: ", len(processed_list))
+        # print("After: ", len(processed_list))
         
     return doc_word
 
@@ -95,11 +101,13 @@ def tokenizer(read_file_name):
 
 # get list of doc and all words in each of them and create positional index
 def create_positional_index(doc_word):
+    print("creating positional index ...")
 
     positional_index = {}
     all_word = []
     i = 0
     LIMIT = Inf
+    # LIMIT = 100
 
     for doc_Id in doc_word:
         if i < LIMIT:
@@ -207,7 +215,8 @@ def find_two_term_without_order(term1, term2, positional_index):
 
 
 
-def search(positional_index, sentense, doc_ID_title):
+# boolean retrieval
+def boolean_search(positional_index, sentense):
     tokenized_query = word_tokenize(sentense)
     
     # print(len(tokenized_query))
@@ -249,22 +258,133 @@ def search(positional_index, sentense, doc_ID_title):
         query_answer.extend(find_one_term(tokenized_query[2], positional_index))
 
 
-    counter = 0
-    # remove duplicate docID
-    for item in remove_duplicate_preserve_order(query_answer):
-        print (counter+1, ") docID: ", item, "| title: ", doc_ID_title[item])
-        counter += 1
-        if counter == 10:
-            break
+    return query_answer
+
+
+
+# create champion list from positional index
+def create_champion_list(positional_index, r=50):
+    print("creating champion list ...")
+
+    champion_list = {}
+
+    for term in positional_index:
+        champion_list[term] = []
+
+        champion_list[term].append(len (positional_index[term][1]))
+        champion_list[term].append({})
+
+        # if number of doc for term is less than our limitation (r), put all doc id champion list for that term.
+        if len (positional_index[term][1]) <= r:
+
+            for doc_Id in positional_index[term][1]:
+                champion_list[term][1][doc_Id] = len(positional_index[term][1][doc_Id])
+        
+        # if number of doc for term is more than our limitation (r), just put doc with the most term.
+        else:
+            term_freq_list = []
+            for doc_Id in positional_index[term][1]:
+                term_freq_list.append(len(positional_index[term][1][doc_Id]))
+
+            # find term freq of word in r rank, and just save word with more than this freq
+            term_freq_list.sort(reverse=True)
+            max_term_freq = term_freq_list[r]
+
+            for doc_Id in positional_index[term][1]:
+                if len(positional_index[term][1][doc_Id]) >= max_term_freq:
+                    champion_list[term][1][doc_Id] = len(positional_index[term][1][doc_Id])
+
+    return champion_list
+
+
+
+# calculate length of all docs vector 
+def calculate_lengths(champion_list):
+    print("calculating length ...")
+
+    lengths = [0] * (ALL_DOC_NUM + 1)
+
+    for term in champion_list:
+        for doc_ID in champion_list[term][1]:
+            lengths [doc_ID] += (1 + math.log10(champion_list[term][1][doc_ID])) * (math.log10(ALL_DOC_NUM/champion_list[term][0]))
+
+    return np.sqrt(lengths)
+
+
+
+# ranked retrieval
+def ranked_search(champion_list, sentense, doc_ID_title, lengths):
+    tokenized_query = word_tokenize(sentense)
+    unique_tokenized_query = Counter(tokenized_query)
+    # print (unique_tokenized_query)
+
+    scores = [0] * (ALL_DOC_NUM + 1)
+
+    for term in unique_tokenized_query:
+        # do not calculate score for term that are not in
+        if term in champion_list:
+            weight_tq = (1 + math.log10(unique_tokenized_query[term])) * (math.log10(ALL_DOC_NUM/champion_list[term][0]))
+        
+            posting = champion_list[term][1]
+
+            for doc_ID in posting:
+                weight_td = (1 + math.log10(posting[doc_ID])) * (math.log10(ALL_DOC_NUM/champion_list[term][0]))
+                scores[doc_ID] += weight_tq * weight_td
+
+    
+    # divide all calculated score to their length
+    normlized_scores = list(map(truediv, scores, lengths))
+
+    # sort scores and return their index 
+    list2 = sorted(range(len(normlized_scores)), key=lambda k: normlized_scores[k])
+    list2.reverse()
+
+    # print highest scores 
+    # print (normlized_scores[list2[0]])
+    # print (normlized_scores[list2[1]])
+    # print (normlized_scores[list2[2]])
+
+    return list2
+
 
 
 if __name__ == "__main__":
     
-    read_normalize_write('IR1_7k_news.xlsx', 'IR1_7k_news_normalized.xlsx')
+    # read_normalize_write('IR1_7k_news.xlsx', 'IR1_7k_news_normalized.xlsx')
     doc_word = tokenizer('IR1_7k_news_normalized.xlsx')
     doc_ID_title = read_doc_title('IR1_7k_news_normalized.xlsx')
     positional_index = create_positional_index(doc_word)
 
+    number_of_doc_for_each_term = 100
+    champion_list = create_champion_list(positional_index, number_of_doc_for_each_term)
+
+    # print first m field 
+    # m = 3
+    # pos = {k: positional_index[k] for k in list(positional_index)[:m]}
+    # print(pos)
+    # cham = {k: champion_list[k] for k in list(champion_list)[:m]}
+    # print(cham)
+
+    lengths = calculate_lengths(champion_list)
+
     while True:
         sentense = input("Enter your query: ")
-        search (positional_index, sentense, doc_ID_title)
+        # query_answer = boolean_search (positional_index, sentense)
+
+        query_answer = ranked_search (champion_list, sentense, doc_ID_title, lengths)
+
+        counter = 0
+        # remove duplicate docID
+        for item in remove_duplicate_preserve_order(query_answer):
+            print (counter+1, ") docID: ", item, "| title: ", doc_ID_title[item])
+            counter += 1
+            if counter == 10:
+                break
+
+
+
+# dont forget to choose stop_word_list in line 65 ...
+
+# positional index example: 'word': [4, {80: [1432], 97: [132, 159, 357]}] 
+# champion list example:    'word': [2, {80: 1, 97: 3}]
+# champion list example:    'word': [doc freq, {doc id: term freq, doc id: term frerq}]
