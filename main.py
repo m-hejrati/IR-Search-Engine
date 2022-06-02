@@ -1,9 +1,5 @@
-from os import wait, wait4
-import re
-from time import sleep
-from gensim import models
 from hazm import *
-from numpy.linalg import norm
+from operator import truediv
 
 import pandas as pd
 from pandas import ExcelWriter
@@ -11,7 +7,6 @@ from numpy import Inf
 import numpy as np 
 import math
 from collections import Counter
-from operator import truediv
 
 import multiprocessing
 import pickle
@@ -19,8 +14,10 @@ from gensim.models import Word2Vec
 from numpy.linalg import norm
 
 
+# ALL_DOC_NUM = 21
 ALL_DOC_NUM = 7561
-
+# ALL_DOC_NUM = 11437
+# ALL_DOC_NUM = 50060
 
 def normalize(txt):
     nmz = Normalizer()
@@ -42,9 +39,10 @@ def read_normalize_write(read_file_name, write_file_name):
         # normalize content and save all data to a new file
         normalized_content = normalize(df_read['content'][i])
 
-        df_new = pd.DataFrame({'content':[normalized_content],
-                        'url':[df_read['url'][i]],
-                        'title': [df_read['title'][i]]})
+        df_new = pd.DataFrame({'id':[df_read['id'][i]],
+                        'content':[normalized_content],
+                        'topic': [df_read['topic'][i]],
+                        'url': [df_read['url'][i]]})
 
         df_write = df_write.append(df_new)
 
@@ -108,7 +106,7 @@ def tokenizer(read_file_name):
 
 # get list of doc and all words in each of them and create positional index
 def create_positional_index(doc_word):
-    print("creating positional index ...")
+    print("Creating positional index ...")
 
     positional_index = {}
     all_word = []
@@ -150,6 +148,7 @@ def create_positional_index(doc_word):
     # print("all unique term: ", len(remove_duplicate_preserve_order(all_word)))
 
     # print(positional_index)
+    print("Done ...")
     return positional_index
 
 
@@ -160,7 +159,7 @@ def read_doc_title(read_file_name):
 
     doc_ID_title = {}
     for i in df_read.index:
-        doc_ID_title [i] = df_read["title"][i]
+        doc_ID_title [i] = df_read["url"][i]
     
     return doc_ID_title
 
@@ -271,7 +270,7 @@ def boolean_search(positional_index, sentense):
 
 # create champion list from positional index
 def create_champion_list(positional_index, r=50):
-    print("creating champion list ...")
+    print("Creating champion list ...")
 
     champion_list = {}
 
@@ -301,13 +300,14 @@ def create_champion_list(positional_index, r=50):
                 if len(positional_index[term][1][doc_Id]) >= max_term_freq:
                     champion_list[term][1][doc_Id] = len(positional_index[term][1][doc_Id])
 
+    print("Done ...")
     return champion_list
 
 
 
 # calculate length of all docs vector 
 def calculate_lengths(champion_list):
-    print("calculating length ...")
+    print("Calculating length ...")
 
     lengths = [0] * (ALL_DOC_NUM + 1)
 
@@ -315,6 +315,7 @@ def calculate_lengths(champion_list):
         for doc_ID in champion_list[term][1]:
             lengths [doc_ID] += (1 + math.log10(champion_list[term][1][doc_ID])) * (math.log10(ALL_DOC_NUM/champion_list[term][0]))
 
+    print("Done ...")
     return np.sqrt(lengths)
 
 
@@ -473,12 +474,117 @@ def enhanced_ranked_search(docs_embedding, query_embedding):
 
 
 
+# find minimum euclidean distance between a doc and all centroids to calculate clusters.
+def calculate_clusters(docs_embedding, centroids, k):
+    clusters = {}
+    for i in range(k):
+        clusters[i] = []
+
+    for i in range(len(docs_embedding)):
+        euc_dist = []
+        for j in range(k):
+            euc_dist.append(np.linalg.norm(docs_embedding[i] - centroids[j]))
+            # euc_dist.append(math.dist(data, centroids[j]))
+        # Append the cluster of data to the dictionary
+        clusters[euc_dist.index(min(euc_dist))].append([i, docs_embedding[i]])
+        # print(clusters)
+    return clusters
+
+
+
+# calculate centroids 
+def recalculate_centroids(centroids, clusters, k):
+    for i in range(k):
+        tmp = np.average(clusters[i], axis=0)
+        # print('*******************************************')
+        # print (tmp)
+        centroids[i] = tmp[1]
+    return centroids
+
+
+
+# run k means algorithm 
+def run_k_means(k, docs_embedding):
+    centroids = {}
+    # initialize centroid with random numbers
+    for i in range(k):
+        centroids[i] = docs_embedding[i]
+ 
+    clusters =  calculate_clusters(docs_embedding, centroids, k)
+    centroids = recalculate_centroids(centroids, clusters, k)
+
+    # recalculate clusters and then centroids.
+    print("Recalculating clusters and centroids ...")
+    for i in range(15):
+        clusters =  calculate_clusters(docs_embedding, centroids, k)
+        centroids = recalculate_centroids(centroids, clusters, k)
+    print("Done ...")
+
+    return centroids, clusters
+
+
+# first select "b" of the most similar centroids and then rank result among these clusters.
+def k_means_search(k_number, b, clusters, centroids, query_embedding):
+
+    centroids_scores = [0] * k_number
+    for i in range (0, k_number):
+        centroids_scores[i] = similarity(centroids[i], query_embedding)
+    
+    # sort scores and return their index 
+    list2 = sorted(range(len(centroids_scores)), key=lambda k: centroids_scores[k])
+    list2.reverse()
+
+    # chosse the most similiar clusters from their centroids.
+    selected_cluster_index = list2[0: b]
+    selected_cluster_item = []
+
+    # concat all selected cluster
+    for i in selected_cluster_index:
+        selected_cluster_item += clusters[i]
+
+    scores = [0] * ALL_DOC_NUM
+    for i in range (0, len(selected_cluster_item)):
+        # scores[i] = similarity(selected_cluster_item[i][1], query_embedding)
+        # print(i)
+        # print(selected_cluster_item[i])
+        scores[selected_cluster_item[i][0]] = similarity(selected_cluster_item[i][1], query_embedding)
+
+    # sort scores and return their index 
+    list3 = sorted(range(len(scores)), key=lambda k: scores[k])
+    list3.reverse()
+
+    return list3
+
+
+
+
 if __name__ == "__main__":
 
+    # read_normalize_write('IR00_dataset_ph3/IR00_3_11k News.xlsx', 'IR00_dataset_ph3/IR00_3_11k News_normalized.xlsx')
+    # read_normalize_write('IR00_dataset_ph3/IR00_3_17k News.xlsx', 'IR00_dataset_ph3/IR00_3_17k News_normalized.xlsx')
+    # read_normalize_write('IR00_dataset_ph3/IR00_3_20k News.xlsx', 'IR00_dataset_ph3/IR00_3_20k News_normalized.xlsx')
+    # importing the required modules
+    # excl_list = []    
+    # excl_list.append(pd.read_excel('IR00_dataset_ph3/IR00_3_11k News_normalized.xlsx'))
+    # excl_list.append(pd.read_excel('IR00_dataset_ph3/IR00_3_17k News_normalized.xlsx'))
+    # excl_list.append(pd.read_excel('IR00_dataset_ph3/IR00_3_20k News_normalized.xlsx'))
+    # excl_merged = pd.concat(excl_list, ignore_index=True)
+    # excl_merged.to_excel('IR00_dataset_ph3/IR00_3_48k News_normalized_merged.xlsx', index=False)
 
-    # read_normalize_write('IR1_7k_news.xlsx', 'IR1_7k_news_normalized.xlsx')
     doc_word = tokenizer('IR1_7k_news_normalized.xlsx')
+    # doc_word = tokenizer('IR00_dataset_ph3/IR00_3_48k News_normalized_merged.xlsx')
+    # doc_word = tokenizer('IR00_dataset_ph3/IR00_3_11k News_normalized.xlsx')
+    # doc_word = tokenizer('IR00_dataset_ph3/IR00.xlsx')
+    # data_file = open('tmp_50k_obj', 'ab')
+    # pickle.dump(doc_word, data_file)          
+    # data_file.close()
+    # handle = open('tmp_50k_obj', 'rb')
+    # doc_word = pickle.load(handle)
+
     doc_ID_title = read_doc_title('IR1_7k_news_normalized.xlsx')
+    # doc_ID_title = read_doc_title('IR00_dataset_ph3/IR00_3_48k News_normalized_merged.xlsx')
+    # doc_ID_title = read_doc_title('IR00_dataset_ph3/IR00_3_11k News_normalized.xlsx')
+    # doc_ID_title = read_doc_title('IR00_dataset_ph3/IR00.xlsx')
     positional_index = create_positional_index(doc_word)
 
     # number_of_doc_for_each_term = 100
@@ -497,6 +603,12 @@ if __name__ == "__main__":
     docs_tf_idf  = calculate_tf_idf(doc_word, champion_list)
     docs_embedding = embed (model_file_name, docs_tf_idf)
 
+    
+    # k means
+    k, b = 15, 3
+    centroids, clusters = run_k_means(k, docs_embedding)
+    # print(clusters)
+
 
     # answer queries
     while True:
@@ -506,7 +618,9 @@ if __name__ == "__main__":
 
         query_tf_idf = calculate_query_tf_idf(sentense)
         query_embedding = embed (model_file_name, [query_tf_idf])
-        query_answer = enhanced_ranked_search (docs_embedding, query_embedding[0])
+        # query_answer = enhanced_ranked_search (docs_embedding, query_embedding[0])
+
+        query_answer = k_means_search(k, b, clusters, centroids, query_embedding[0])
 
         counter = 0
         # remove duplicate docID
@@ -523,3 +637,6 @@ if __name__ == "__main__":
 # positional index example: 'word': [4, {80: [1432], 97: [132, 159, 357]}] 
 # champion list example:    'word': [2, {80: 1, 97: 3}]
 # champion list example:    'word': [doc freq, {doc id: term freq, doc id: term frerq}]
+
+# I used this website for the k-means algorithm
+# https://towardsdatascience.com/k-means-without-libraries-python-feb3572e2eef
