@@ -14,8 +14,8 @@ from gensim.models import Word2Vec
 from numpy.linalg import norm
 
 
-# ALL_DOC_NUM = 21
-ALL_DOC_NUM = 7561
+ALL_DOC_NUM = 80
+# ALL_DOC_NUM = 7561
 # ALL_DOC_NUM = 11437
 # ALL_DOC_NUM = 50060
 
@@ -159,7 +159,7 @@ def read_doc_title(read_file_name):
 
     doc_ID_title = {}
     for i in df_read.index:
-        doc_ID_title [i] = df_read["url"][i]
+        doc_ID_title [i] = [df_read["url"][i], df_read["topic"][i]]
     
     return doc_ID_title
 
@@ -440,7 +440,9 @@ def similarity(doc1, doc2):
 
 # get query sentence and calculate tf idf weight for its term
 def calculate_query_tf_idf(sentense):
-    tokenized_query = word_tokenize(sentense)
+    print("query:", sentense)
+    
+    tokenized_query = word_tokenize(sentense[1:])
     unique_tokenized_query = Counter(tokenized_query)
 
     term_weight_dic = {}
@@ -498,7 +500,12 @@ def recalculate_centroids(centroids, clusters, k):
         tmp = np.average(clusters[i], axis=0)
         # print('*******************************************')
         # print (tmp)
-        centroids[i] = tmp[1]
+        # print(i)
+
+        # temprory: handle Not A Number error
+        if not np.isnan(tmp[1][0]):
+            centroids[i] = tmp[1]
+    
     return centroids
 
 
@@ -515,7 +522,7 @@ def run_k_means(k, docs_embedding):
 
     # recalculate clusters and then centroids.
     print("Recalculating clusters and centroids ...")
-    for i in range(15):
+    for i in range(10):
         clusters =  calculate_clusters(docs_embedding, centroids, k)
         centroids = recalculate_centroids(centroids, clusters, k)
     print("Done ...")
@@ -524,7 +531,9 @@ def run_k_means(k, docs_embedding):
 
 
 # first select "b" of the most similar centroids and then rank result among these clusters.
-def k_means_search(k_number, b, clusters, centroids, query_embedding):
+def k_means_search(k_number, b, clusters, centroids, query_embedding, translate, category):
+
+    print("category: ", category)
 
     centroids_scores = [0] * k_number
     for i in range (0, k_number):
@@ -534,13 +543,19 @@ def k_means_search(k_number, b, clusters, centroids, query_embedding):
     list2 = sorted(range(len(centroids_scores)), key=lambda k: centroids_scores[k])
     list2.reverse()
 
+    list2_cat = []
+    for i in list2:
+        if translate[i] == category:
+            list2_cat.append(i)
+
     # chosse the most similiar clusters from their centroids.
-    selected_cluster_index = list2[0: b]
+    selected_cluster_index = list2_cat[0: b]
     selected_cluster_item = []
 
     # concat all selected cluster
     for i in selected_cluster_index:
-        selected_cluster_item += clusters[i]
+        selected_cluster_item += clusters[translate[i]]
+        print(translate[i])
 
     scores = [0] * ALL_DOC_NUM
     for i in range (0, len(selected_cluster_item)):
@@ -557,6 +572,36 @@ def k_means_search(k_number, b, clusters, centroids, query_embedding):
 
 
 
+# label clusters
+def label_classes(clusters):
+    translate = {}
+
+    for key, value in clusters.items():
+        
+        topics = {}
+        for doc_id in value:
+            # docs in each cluster
+            # print(doc_id[0])
+            topic = doc_ID_title[doc_id[0]][1]
+        
+            if topic not in topics:
+                topics[topic] = 1
+            else:
+                topics[topic] += 1
+
+        # print(topics)
+        label = max(topics, key=topics.get)
+        translate[key] = label
+
+        # selected label for cluster
+        # print(label)
+
+    # change old with new keys
+    for old, new in translate.items():
+        clusters[new] = clusters.pop(old)
+
+    return translate
+
 
 if __name__ == "__main__":
 
@@ -571,20 +616,19 @@ if __name__ == "__main__":
     # excl_merged = pd.concat(excl_list, ignore_index=True)
     # excl_merged.to_excel('IR00_dataset_ph3/IR00_3_48k News_normalized_merged.xlsx', index=False)
 
-    doc_word = tokenizer('IR1_7k_news_normalized.xlsx')
+    # doc_word = tokenizer('IR1_7k_news_normalized.xlsx')
     # doc_word = tokenizer('IR00_dataset_ph3/IR00_3_48k News_normalized_merged.xlsx')
     # doc_word = tokenizer('IR00_dataset_ph3/IR00_3_11k News_normalized.xlsx')
-    # doc_word = tokenizer('IR00_dataset_ph3/IR00.xlsx')
+    doc_word = tokenizer('IR00_dataset_ph3/IR00.xlsx')
     # data_file = open('tmp_50k_obj', 'ab')
     # pickle.dump(doc_word, data_file)          
     # data_file.close()
     # handle = open('tmp_50k_obj', 'rb')
     # doc_word = pickle.load(handle)
 
-    doc_ID_title = read_doc_title('IR1_7k_news_normalized.xlsx')
+    doc_ID_title = read_doc_title('IR00_dataset_ph3/IR00.xlsx')
     # doc_ID_title = read_doc_title('IR00_dataset_ph3/IR00_3_48k News_normalized_merged.xlsx')
     # doc_ID_title = read_doc_title('IR00_dataset_ph3/IR00_3_11k News_normalized.xlsx')
-    # doc_ID_title = read_doc_title('IR00_dataset_ph3/IR00.xlsx')
     positional_index = create_positional_index(doc_word)
 
     # number_of_doc_for_each_term = 100
@@ -605,9 +649,12 @@ if __name__ == "__main__":
 
     
     # k means
-    k, b = 15, 3
+    k, b = 5, 1
+    # clusters: {cluster_id: [[doc_id, data], ...]}
     centroids, clusters = run_k_means(k, docs_embedding)
     # print(clusters)
+
+    translate = label_classes(clusters)
 
 
     # answer queries
@@ -616,16 +663,17 @@ if __name__ == "__main__":
         # query_answer = boolean_search (positional_index, sentense)
         # query_answer = ranked_search (champion_list, sentense, lengths)
 
-        query_tf_idf = calculate_query_tf_idf(sentense)
+        query_tf_idf = calculate_query_tf_idf(sentense.partition(' ')[2])
         query_embedding = embed (model_file_name, [query_tf_idf])
         # query_answer = enhanced_ranked_search (docs_embedding, query_embedding[0])
 
-        query_answer = k_means_search(k, b, clusters, centroids, query_embedding[0])
+        query_answer = k_means_search(k, b, clusters, centroids, query_embedding[0], translate, sentense.partition(' ')[0])
 
         counter = 0
         # remove duplicate docID
         for item in remove_duplicate_preserve_order(query_answer):
-            print (counter+1, ") docID: ", item, "| title: ", doc_ID_title[item])
+            # doc_ID_title : {id : [url, topic]}
+            print (counter+1, ") docID: ", item, "| title: ", doc_ID_title[item][0])
             counter += 1
             if counter == 10:
                 break
